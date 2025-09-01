@@ -1,9 +1,13 @@
 # API Gateway Dockerfile - Using debian base for glibc compatibility
-FROM node:18-slim
+FROM node:24-slim
 
 # Build args to handle arch-aware download of WhatsApp binary
 ARG TARGETARCH
-ARG WHATSAPP_VERSION=7.4.0
+ARG WHATSAPP_VERSION=7.5.0
+
+# Declare ARGs again to make them available in RUN
+ARG TARGETARCH
+ARG WHATSAPP_VERSION
 
 # Install system dependencies including unzip and wget for binary download
 RUN apt-get update && apt-get install -y \
@@ -17,34 +21,49 @@ RUN apt-get update && apt-get install -y \
 # Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
 
-# Install Node.js dependencies
-RUN npm ci --only=production
+# Copy package files e tsconfig
+COPY package*.json ./
+COPY tsconfig.json ./
+
+
+# Instala dependências (inclui devDependencies para build)
+RUN npm ci
 
 # Download and setup go-whatsapp-web-multidevice binary (arch-aware)
 # TARGETARCH values are typically: amd64 | arm64
 RUN set -eux; \
-    case "${TARGETARCH}" in \
-      amd64) ARCH_SUFFIX=amd64; FOLDER_NAME=linux-amd64 ;; \
-      arm64) ARCH_SUFFIX=arm64; FOLDER_NAME=linux-arm64 ;; \
-      *) echo "Unsupported architecture: ${TARGETARCH}"; exit 1 ;; \
-    esac; \
+    WHATSAPP_VERSION="7.5.0"; \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        ARCH_SUFFIX="arm64"; \
+        FOLDER_NAME="linux-arm64"; \
+    else \
+        ARCH_SUFFIX="amd64"; \
+        FOLDER_NAME="linux-amd64"; \
+    fi; \
+    echo "Downloading WhatsApp binary for architecture: $TARGETARCH (${ARCH_SUFFIX})"; \
     wget -O whatsapp_linux_${ARCH_SUFFIX}.zip \
-      https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v${WHATSAPP_VERSION}/whatsapp_${WHATSAPP_VERSION}_linux_${ARCH_SUFFIX}.zip; \
+      "https://github.com/aldinokemal/go-whatsapp-web-multidevice/releases/download/v${WHATSAPP_VERSION}/whatsapp_${WHATSAPP_VERSION}_linux_${ARCH_SUFFIX}.zip"; \
     unzip whatsapp_linux_${ARCH_SUFFIX}.zip; \
     mv ${FOLDER_NAME} whatsapp; \
     chmod +x whatsapp; \
     rm -f whatsapp_linux_${ARCH_SUFFIX}.zip readme.md
 
-# Copy application source
-COPY api-gateway/src ./src
+COPY src ./src
 COPY openapi.yaml ./openapi.yaml
 COPY docs ./docs
 
+
+# Build TypeScript
+RUN npm run build
+
+# Remove devDependencies para imagem final enxuta
+RUN npm prune --production
+
+# Copy schema.sql to dist (garantido pelo postbuild)
+
 # Create necessary directories
-RUN mkdir -p /app/volumes /app/logs /app/sessions
+RUN mkdir -p /app/data/volumes /app/data/sessions /app/logs
 
 # Create non-root user
 RUN groupadd -g 1001 gateway && \
@@ -67,6 +86,10 @@ EXPOSE 3000
 # Environment variables
 ENV NODE_ENV=production
 ENV API_PORT=3000
+ENV BIN_PATH=/app/whatsapp
+ENV SESSIONS_DIR=/app/data/sessions
+ENV VOLUMES_DIR=/app/data/volumes
+ENV APP_BASE_DIR=/app
 
-# Start command
-CMD ["node", "src/server.js"]
+# Start command (TypeScript build)
+CMD ["node", "dist/server.js"]

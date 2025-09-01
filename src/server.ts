@@ -1,31 +1,43 @@
-const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const rateLimit = require('express-rate-limit');
-const dotenv = require('dotenv');
-const http = require('http');
-const WebSocket = require('ws');
+
+import express, { Application } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
+import dotenv from 'dotenv';
+import http from 'http';
+import WebSocket from 'ws';
 
 // Load environment variables
 dotenv.config();
 
 // Import custom modules
-const logger = require('./utils/logger');
-const binaryManager = require('./services/binaryManager');
-const deviceManager = require('./services/newDeviceManager');
-const updateManager = require('./services/updateManager');
-const { authMiddleware, authManager } = require('./middleware/auth');
-const { errorHandler } = require('./middleware/errorHandler');
+
+import logger from './utils/logger';
+import binaryManager from './services/binaryManager';
+import deviceManager from './services/newDeviceManager';
+import updateManager from './services/updateManager';
+import backupManager from './services/backupManager';
+import { authMiddleware, authManager } from './middleware/auth';
+import { errorHandler } from './middleware/errorHandler';
 
 // Import routes
-const deviceRoutes = require('./routes/devices');
-const healthRoutes = require('./routes/health');
-const docsRoutes = require('./routes/docs');
+
+import deviceRoutes from './routes/devices';
+import healthRoutes from './routes/health';
+import docsRoutes from './routes/docs';
+import backupRoutes from './routes/backup';
 
 // Import consolidated proxy route
-const proxyRoutes = require('./routes/proxy');
+
+import proxyRoutes from './routes/proxy';
+
 
 class APIGateway {
+  app: Application;
+  server: http.Server;
+  port: number | string;
+  wss!: WebSocket.Server;
+
   constructor() {
     console.log('🏗️ Iniciando constructor...');
     this.app = express();
@@ -52,15 +64,24 @@ class APIGateway {
   }
 
   setupMiddleware() {
+    // Trust proxy for accurate IP detection (needed for rate limiting and logging)
+    this.app.set('trust proxy', true);
+
     // Security middleware
     this.app.use(helmet());
     this.app.use(cors());
 
-    // Rate limiting
+    // Rate limiting with better configuration for proxy environments
     const limiter = rateLimit({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: process.env.API_RATE_LIMIT || 100,
-      message: 'Muitas requisições deste IP, tente novamente em 15 minutos.'
+      max: typeof process.env.API_RATE_LIMIT === 'string' ? parseInt(process.env.API_RATE_LIMIT) : 100,
+      message: 'Muitas requisições deste IP, tente novamente em 15 minutos.',
+      standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+      legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+      // Use a more reliable key generator that handles proxied requests
+      keyGenerator: (req) => {
+        return req.ip || req.connection.remoteAddress || 'unknown';
+      }
     });
     this.app.use(limiter);
 
@@ -68,8 +89,12 @@ class APIGateway {
     this.app.use(express.json({ limit: '10mb' }));
     this.app.use(express.urlencoded({ extended: true }));
 
-    // Logging
+    // Logging (reduce verbosity in production)
     this.app.use((req, res, next) => {
+      // Only log non-health check requests in production to reduce log volume
+      if (process.env.NODE_ENV === 'production' && req.path === '/api/health') {
+        return next();
+      }
       logger.info(`${req.method} ${req.path} - ${req.ip}`);
       next();
     });
@@ -84,6 +109,7 @@ class APIGateway {
     this.app.use('/api', authMiddleware);
 
     this.app.use('/api/devices', deviceRoutes);
+    this.app.use('/api/backup', backupRoutes);
     
     // Consolidated proxy routes with instance_id support
     this.app.use('/api', proxyRoutes);
@@ -98,6 +124,7 @@ class APIGateway {
         endpoints: {
           health: '/api/health',
           devices: '/api/devices',
+          backup: '/api/backup',
           proxy: '/api/* (app, send, user, message, chat, group, newsletter)',
           docs: '/docs'
         },
@@ -120,7 +147,7 @@ class APIGateway {
       path: '/ws'
     });
 
-    this.wss.on('connection', (ws, req) => {
+    this.wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
       logger.info(`WebSocket client connected: ${req.socket.remoteAddress}`);
 
       // Send welcome message
@@ -131,14 +158,13 @@ class APIGateway {
       }));
 
       // Handle messages from client
-      ws.on('message', (data) => {
+      ws.on('message', (data: WebSocket.RawData) => {
         try {
           const message = JSON.parse(data.toString());
           logger.info(`WebSocket message received:`, message);
-          
           // Handle different message types
           if (message.type === 'join-device') {
-            ws.deviceFilter = message.deviceHash;
+            (ws as any).deviceFilter = message.deviceHash;
             ws.send(JSON.stringify({
               type: 'joined-device',
               deviceHash: message.deviceHash,
@@ -152,7 +178,7 @@ class APIGateway {
               timestamp: new Date().toISOString()
             }));
           }
-        } catch (error) {
+        } catch (error: any) {
           logger.error('Error parsing WebSocket message:', error);
           ws.send(JSON.stringify({
             type: 'error',
@@ -162,17 +188,17 @@ class APIGateway {
         }
       });
 
-      ws.on('close', (code, reason) => {
-        logger.info(`WebSocket client disconnected: ${code} ${reason}`);
+      ws.on('close', (code: number, reason: Buffer) => {
+        logger.info(`WebSocket client disconnected: ${code} ${reason.toString()}`);
       });
 
-      ws.on('error', (error) => {
+      ws.on('error', (error: Error) => {
         logger.error('WebSocket error:', error);
       });
     });
 
     // Make WebSocket server available globally
-    global.webSocketServer = this.wss;
+    (global as any).webSocketServer = this.wss;
     
     logger.info('WebSocket server configured on path /ws');
   }
@@ -210,6 +236,11 @@ class APIGateway {
       updateManager.initialize();
       console.log('✅ updateManager inicializado');
 
+      // Initialize Backup Manager
+      console.log('💾 Inicializando backupManager...');
+      await backupManager.initialize();
+      console.log('✅ backupManager inicializado');
+
       // Start server last
       this.server.listen(this.port, () => {
         logger.info(`🚀 API Gateway rodando na porta ${this.port}`);
@@ -225,8 +256,8 @@ class APIGateway {
 
     } catch (error) {
       logger.error('Erro ao inicializar API Gateway:', error);
-      console.error('ERRO CRÍTICO:', error.message);
-      console.error('STACK:', error.stack);
+  console.error('ERRO CRÍTICO:', (error as any).message);
+  console.error('STACK:', (error as any).stack);
       process.exit(1);
     }
   }
@@ -237,6 +268,9 @@ class APIGateway {
     try {
       // Stop update manager
       updateManager.stop();
+      
+      // Stop backup manager
+      backupManager.stop();
       
       // Close server
       this.server.close(() => {
@@ -261,4 +295,4 @@ const gateway = new APIGateway();
 console.log('✅ Instância criada, iniciando start()...');
 gateway.start();
 
-module.exports = gateway;
+export default gateway;

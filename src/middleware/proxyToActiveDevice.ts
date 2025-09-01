@@ -1,8 +1,8 @@
-const axios = require('axios');
-const { asyncHandler, CustomError } = require('./errorHandler');
-const deviceManager = require('../services/newDeviceManager');
-const DeviceRepository = require('../repositories/DeviceRepository');
-const logger = require('../utils/logger');
+import axios from 'axios';
+import { asyncHandler, CustomError } from './errorHandler';
+import deviceManager from '../services/newDeviceManager';
+import DeviceRepository from '../repositories/DeviceRepository';
+import logger from '../utils/logger';
 
 const DEFAULT_ADMIN_USER = process.env.DEFAULT_ADMIN_USER || 'admin';
 const DEFAULT_ADMIN_PASS = process.env.DEFAULT_ADMIN_PASS || 'admin';
@@ -15,7 +15,8 @@ const DEFAULT_ADMIN_PASS = process.env.DEFAULT_ADMIN_PASS || 'admin';
  * 
  * All in one step for better performance and simplicity
  */
-const proxyToActiveDevice = asyncHandler(async (req, res) => {
+import { Request, Response, NextFunction } from 'express';
+const proxyToActiveDevice = asyncHandler(async (req: Request, res: Response, next?: NextFunction) => {
   // 1. Extract instanceId from header
   const instanceId = req.get('x-instance-id');
   if (!instanceId) {
@@ -82,6 +83,9 @@ const proxyToActiveDevice = asyncHandler(async (req, res) => {
     'Authorization': `Basic ${Buffer.from(`${DEFAULT_ADMIN_USER}:${DEFAULT_ADMIN_PASS}`).toString('base64')}`
   };
 
+  // Attach device to request for next middleware
+  (req as any).device = device;
+
   try {
     logger.debug(`Proxying ${req.method} ${req.originalUrl} to ${targetUrl} for device ${instanceId}`);
     
@@ -94,15 +98,36 @@ const proxyToActiveDevice = asyncHandler(async (req, res) => {
       timeout: 30000
     });
 
-    // Forward response
-    res.status(response.status).json(response.data);
+    // Store response data in request for next middleware or send directly
+    (req as any).proxyResponse = {
+      status: response.status,
+      data: response.data
+    };
+
+    // If there's a next middleware, call it; otherwise send the response
+    if (next) {
+      next();
+    } else {
+      res.status(response.status).json(response.data);
+    }
 
   } catch (error) {
-    if (error.response) {
+    const err = error as any;
+    if (err.response) {
       // Container responded with error
-      logger.warn(`Container error for device ${instanceId}: ${error.response.status} - ${JSON.stringify(error.response.data)}`);
-      res.status(error.response.status).json(error.response.data);
-    } else if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') {
+      logger.warn(`Container error for device ${instanceId}: ${err.response.status} - ${JSON.stringify(err.response.data)}`);
+      
+      // Store error response in request or send directly
+      if (next) {
+        (req as any).proxyResponse = {
+          status: err.response.status,
+          data: err.response.data
+        };
+        next();
+      } else {
+        res.status(err.response.status).json(err.response.data);
+      }
+    } else if (err.code === 'ECONNREFUSED' || err.code === 'ETIMEDOUT') {
       // Container is not reachable
       throw new CustomError(
         `Dispositivo ${instanceId} não está acessível. Container pode estar desligado.`,
@@ -111,7 +136,7 @@ const proxyToActiveDevice = asyncHandler(async (req, res) => {
       );
     } else {
       // Other network/proxy errors
-      logger.error(`Proxy error for device ${instanceId}:`, error.message);
+      logger.error(`Proxy error for device ${instanceId}:`, err.message);
       throw new CustomError(
         'Erro interno no proxy da requisição',
         500,
@@ -121,4 +146,4 @@ const proxyToActiveDevice = asyncHandler(async (req, res) => {
   }
 });
 
-module.exports = proxyToActiveDevice;
+export default proxyToActiveDevice;

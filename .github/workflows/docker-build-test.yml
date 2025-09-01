@@ -35,7 +35,7 @@ jobs:
       uses: docker/build-push-action@v5
       with:
         context: .
-        file: ./api-gateway/Dockerfile
+        file: ./Dockerfile
         platforms: linux/amd64
         push: false  # Não faz push
         tags: ${{ steps.meta.outputs.tags }}
@@ -43,7 +43,7 @@ jobs:
         cache-from: type=gha
         cache-to: type=gha,mode=max
         build-args: |
-          WHATSAPP_VERSION=7.4.0
+          WHATSAPP_VERSION=7.5.0
 
     - name: Test completed
       run: echo "✅ Build test completed successfully!"

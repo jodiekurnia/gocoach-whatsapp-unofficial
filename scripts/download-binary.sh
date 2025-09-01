@@ -2,8 +2,8 @@
 # Simplificado: detecta SO/arch, baixa e extrai direto em api-gateway/whatsapp
 set -e
 
-VER="${WHATSAPP_VERSION:-7.4.1}"
-OUT_DIR="api-gateway"
+VER="${WHATSAPP_VERSION:-7.5.0}"
+OUT_DIR="dist"
 
 uname_s=$(uname -s)
 case "$uname_s" in
